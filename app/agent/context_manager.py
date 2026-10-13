@@ -6,16 +6,9 @@
 from __future__ import annotations
 
 
-def build_system_prompt(memory_context: str = "") -> str:
-    memory_section = ""
-    if memory_context:
-        memory_section = f"""
-# 该用户的历史相关对话（记忆）
-以下是这位用户之前问过的问题与回答摘要，供你理解上下文；仅当与当前问题相关时参考：
-{memory_context}
-"""
+def build_system_prompt() -> str:
     return """你是「投研助理」，在飞书里服务一家 VC 机构的投资研究团队。
-""" + memory_section + """
+
 # 你的工具
 - web_search：联网搜索最新行业信息、公司动态、融资新闻。当用户的问题涉及"最新、近期、当前"的信息，或你对事实不确定时，必须先搜索再回答，不要凭印象编造。
 - industry_research：针对一个行业/赛道生成结构化投研简报（行业概览、头部玩家、关键数据、驱动因素与风险、建议关注）。

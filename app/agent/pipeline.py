@@ -67,15 +67,6 @@ class PipelineMixin:
     def run_stream(self, user_message: str):
         """流式执行 Agent 循环，逐事件 yield。"""
         self.current_run_id = f"run_{uuid.uuid4().hex}"
-
-        # 记忆检索：把该用户历史相关的问答注入 system prompt
-        store = getattr(self, "memory_store", None)
-        if store is not None:
-            memories = store.select(user_message, scope=self.user_scope, top_k=3)
-            self._memory_context = store.format(memories)
-            if memories:
-                logger.info("[memory] 命中 %d 条历史记忆", len(memories))
-
         self.messages.append({"role": "user", "content": user_message})
         logger.info("[user] %s", user_message[:200])
 
@@ -148,8 +139,8 @@ class PipelineMixin:
                 # 模型认为不需要调工具了 → 输出最终文字
                 final_text = extract_text(response.content)
                 logger.info("[turn %d] 完成: %d 字符", turn + 1, len(final_text or ""))
-                # 伪流式：按小片切出，配合前端 1s 节流呈现逐字效果
-                step = 6
+                # 伪流式：按大段切片，配合前端 1s 节流，视觉上有渐进感但不拖沓
+                step = 40
                 for i in range(0, len(final_text), step):
                     yield {"type": "text_delta", "delta": final_text[i : i + step]}
                 break
@@ -197,8 +188,10 @@ class PipelineMixin:
                     if final_text:
                         break
 
-        # 记忆写入：本轮问答摘要入库，供下次检索
-        if store is not None and final_text:
-            store.add(self.user_scope, f"Q: {user_message}\nA: {final_text[:300]}")
+        # 会话保存：保留最近对话历史，下次同用户提问时恢复（多轮上下文）
+        _save_session_scope = getattr(self, "user_scope", "")
+        if _save_session_scope:
+            from app.agent.agent import _save_session
+            _save_session(_save_session_scope, self.messages)
 
         yield {"type": "done", "text": final_text or "", "total_turns": turn + 1}

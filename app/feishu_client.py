@@ -164,6 +164,22 @@ def send_card(chat_id: str, card: dict) -> dict:
     return resp.json()
 
 
+def send_file(chat_id: str, file_key: str) -> dict:
+    """主动发送文件消息到指定群（文档导出等场景）。"""
+    resp = httpx.post(
+        f"{_BASE}/im/v1/messages",
+        headers=_headers(),
+        params={"receive_id_type": "chat_id"},
+        json={
+            "receive_id": chat_id,
+            "content": json_dumps({"file_key": file_key}),
+            "msg_type": "file",
+        },
+        timeout=10,
+    )
+    return resp.json()
+
+
 def json_dumps(obj: Any) -> str:
     import json
 

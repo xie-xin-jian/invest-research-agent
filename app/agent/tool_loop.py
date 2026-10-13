@@ -117,7 +117,7 @@ class ToolLoopMixin:
         def _call():
             return self.client.messages.create(
                 model=self.recovery.current_model,
-                system=build_system_prompt(getattr(self, "_memory_context", "")),
+                system=build_system_prompt(),
                 messages=messages,
                 tools=self.registry.schemas(),
                 max_tokens=self.recovery.current_max_tokens,

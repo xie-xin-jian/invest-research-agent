@@ -74,6 +74,7 @@ async def webhook(req: Request, background_tasks: BackgroundTasks) -> Any:
     message_id = msg.get("message_id", "")
     content_str = msg.get("content", "{}")
     chat_type = msg.get("chat_type", "")  # p2p / group
+    chat_id = msg.get("chat_id", "")  # 群ID，日报管理工具需要
     # 发送者 open_id：记忆按 user:{open_id} 隔离
     open_id = (
         event.get("sender", {}).get("sender_id", {}).get("open_id", "")
@@ -96,12 +97,14 @@ async def webhook(req: Request, background_tasks: BackgroundTasks) -> Any:
         elif not mentions:
             return JSONResponse({"ok": True})
         for m in mentions:
-            name = m.get("name", "")
-            if user_text.startswith(f"@{name}"):
-                user_text = user_text[len(f"@{name}"):].strip()
-            # 也兼容无空格的 @name 前缀
-            if user_text.startswith(name):
-                user_text = user_text[len(name):].strip()
+            key = m.get("key", "")  # 如 "@_user_1"
+            name = m.get("name", "")  # 如 "search"
+            # 移除文本中所有位置的 @name 和 @_user_X 占位符（开头/中间/末尾都可能）
+            if key:
+                user_text = user_text.replace(key, "").strip()
+            if name:
+                user_text = user_text.replace(f"@{name}", "").strip()
+                user_text = user_text.replace(name, "").strip() if user_text.startswith(name) else user_text
 
     user_text = user_text.strip()
 
@@ -127,7 +130,7 @@ async def webhook(req: Request, background_tasks: BackgroundTasks) -> Any:
 
     # 7. 立即返回 200，耗时处理放后台。
     #    飞书要求 webhook 3 秒内响应，否则重试推送 → 同一消息被处理多次
-    background_tasks.add_task(handle_message, message_id, user_text, open_id)
+    background_tasks.add_task(handle_message, message_id, user_text, open_id, chat_id)
     return JSONResponse({"ok": True})
 
 
@@ -154,10 +157,10 @@ def handle_doc_request(message_id: str, text: str) -> None:
         feishu_client.reply_text(message_id, f"文档生成失败：{e}")
 
 
-def handle_message(message_id: str, user_text: str, open_id: str = "") -> None:
+def handle_message(message_id: str, user_text: str, open_id: str = "", chat_id: str = "") -> None:
     """后台处理消息：占位卡片 → Agent 循环（模型自己选工具）→ 节流更新。"""
     if not user_text:
-        feishu_client.reply_text(message_id, "在的，说一句话试试，比如：\n研究下人形机器人行业\n最近固态电池有什么新动态\n读研报：[粘贴文本]\n纪要：[粘贴文本]")
+        feishu_client.reply_text(message_id, "在的，说一句话试试，比如：\n研究下人形机器人行业\n最近固态电池有什么新动态\n订阅日报：人形机器人，每天9点\n读研报：[粘贴文本]\n纪要：[粘贴文本]")
         return
 
     # 先回一条占位卡片，告诉用户在处理
@@ -168,7 +171,7 @@ def handle_message(message_id: str, user_text: str, open_id: str = "") -> None:
     reply_msg_id = placeholder.get("data", {}).get("message_id", message_id)
 
     try:
-        _stream_agent_into_card(reply_msg_id, user_text, open_id)
+        _stream_agent_into_card(reply_msg_id, user_text, open_id, chat_id)
     except Exception as e:
         logger.exception("handle failed")
         feishu_client.reply_text(message_id, f"处理失败：{e}")
@@ -180,10 +183,12 @@ _TOOL_LABELS = {
     "industry_research": "生成行业简报",
     "report_reader": "速读研报",
     "meeting_notes": "整理会议纪要",
+    "manage_report": "管理日报任务",
+    "export_doc": "导出文档",
 }
 
 
-def _stream_agent_into_card(reply_msg_id: str, user_text: str, open_id: str = "") -> None:
+def _stream_agent_into_card(reply_msg_id: str, user_text: str, open_id: str = "", chat_id: str = "") -> None:
     """跑 Agent 循环，把事件流映射成卡片更新（与 _stream_into_card 同一套 1s 节流限流）。
 
     事件映射：
@@ -191,7 +196,10 @@ def _stream_agent_into_card(reply_msg_id: str, user_text: str, open_id: str = ""
     - text_delta  → 累积最终回答，1s 节流更新
     - error/done  → 收尾更新
     """
-    agent = ResearchAgent(user_scope=f"user:{open_id}" if open_id else "")
+    agent = ResearchAgent(
+        user_scope=f"user:{open_id}" if open_id else "",
+        chat_id=chat_id,
+    )
     buffer = ""
     last_update = 0.0
 

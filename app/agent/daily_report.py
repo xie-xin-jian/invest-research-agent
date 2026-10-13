@@ -183,27 +183,40 @@ _REPORT_PROMPT = """今天是 {date}。请为投研团队生成一份「{topic}�
 
 
 def run_job(job: ReportJob) -> None:
-    """执行一次日报：Agent 自主搜索整理 → 卡片推到目标群。"""
+    """执行一次日报：先发占位卡片 → Agent 自主搜索整理 → 更新卡片。"""
     from app.agent.agent import ResearchAgent  # 延迟 import 避免循环
 
     logger.info("[daily_report] 执行 %s topic=%s", job.id, job.topic)
+    title = f"{job.topic} · 每日行业日报"
+
+    # 立即发占位卡片，让用户知道日报开始生成了
+    try:
+        card = feishu_client.send_card(
+            job.chat_id,
+            markdown_to_card(f"⏳ 正在生成「{job.topic}」日报，搜索最新动态中…", title=title),
+        )
+        card_msg_id = card.get("data", {}).get("message_id", "")
+    except Exception:
+        card_msg_id = ""
+
     try:
         agent = ResearchAgent()
         md = agent.run(_REPORT_PROMPT.format(date=datetime.now().strftime("%Y-%m-%d"), topic=job.topic))
         if not md.strip():
             md = f"今日「{job.topic}」日报生成失败：模型未返回内容。"
-        feishu_client.send_card(
-            job.chat_id,
-            markdown_to_card(md, title=f"{job.topic} · 每日行业日报"),
-        )
+        if card_msg_id:
+            feishu_client.update_card(card_msg_id, markdown_to_card(md, title=title))
+        else:
+            feishu_client.send_card(job.chat_id, markdown_to_card(md, title=title))
         logger.info("[daily_report] %s 推送完成", job.id)
     except Exception:
         logger.exception("[daily_report] %s 执行失败", job.id)
+        err_card = markdown_to_card(f"⚠️ 今日「{job.topic}」日报生成失败，请查看服务日志。", title=title)
         try:
-            feishu_client.send_card(
-                job.chat_id,
-                markdown_to_card(f"⚠️ 今日「{job.topic}」日报生成失败，请查看服务日志。", title=f"{job.topic} · 每日行业日报"),
-            )
+            if card_msg_id:
+                feishu_client.update_card(card_msg_id, err_card)
+            else:
+                feishu_client.send_card(job.chat_id, err_card)
         except Exception:
             logger.exception("[daily_report] %s 失败通知也发送失败", job.id)
 
