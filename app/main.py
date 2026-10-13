@@ -14,8 +14,9 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app import docx_export, feishu_client
+from app.agent import daily_report
+from app.agent.agent import ResearchAgent
 from app.card import markdown_to_card
-from app.router import _strip_prefix, route_stream
 from app.tools import industry_research, report_reader
 from config import config
 
@@ -73,6 +74,10 @@ async def webhook(req: Request, background_tasks: BackgroundTasks) -> Any:
     message_id = msg.get("message_id", "")
     content_str = msg.get("content", "{}")
     chat_type = msg.get("chat_type", "")  # p2p / group
+    # 发送者 open_id：记忆按 user:{open_id} 隔离
+    open_id = (
+        event.get("sender", {}).get("sender_id", {}).get("open_id", "")
+    )
 
     # 提取用户文本
     user_text = _extract_text(content_str)
@@ -122,7 +127,7 @@ async def webhook(req: Request, background_tasks: BackgroundTasks) -> Any:
 
     # 7. 立即返回 200，耗时处理放后台。
     #    飞书要求 webhook 3 秒内响应，否则重试推送 → 同一消息被处理多次
-    background_tasks.add_task(handle_message, message_id, user_text)
+    background_tasks.add_task(handle_message, message_id, user_text, open_id)
     return JSONResponse({"ok": True})
 
 
@@ -149,10 +154,10 @@ def handle_doc_request(message_id: str, text: str) -> None:
         feishu_client.reply_text(message_id, f"文档生成失败：{e}")
 
 
-def handle_message(message_id: str, user_text: str) -> None:
-    """后台处理消息：占位卡片 → 流式生成 → 节流更新。同步函数，由 BackgroundTasks 跑在线程池。"""
+def handle_message(message_id: str, user_text: str, open_id: str = "") -> None:
+    """后台处理消息：占位卡片 → Agent 循环（模型自己选工具）→ 节流更新。"""
     if not user_text:
-        feishu_client.reply_text(message_id, "在的，说一句话试试，比如：\n研究下人形机器人行业\n读研报：[粘贴文本]\n纪要：[粘贴文本]")
+        feishu_client.reply_text(message_id, "在的，说一句话试试，比如：\n研究下人形机器人行业\n最近固态电池有什么新动态\n读研报：[粘贴文本]\n纪要：[粘贴文本]")
         return
 
     # 先回一条占位卡片，告诉用户在处理
@@ -163,10 +168,67 @@ def handle_message(message_id: str, user_text: str) -> None:
     reply_msg_id = placeholder.get("data", {}).get("message_id", message_id)
 
     try:
-        _stream_into_card(reply_msg_id, route_stream(user_text))
+        _stream_agent_into_card(reply_msg_id, user_text, open_id)
     except Exception as e:
         logger.exception("handle failed")
         feishu_client.reply_text(message_id, f"处理失败：{e}")
+
+
+# Agent 工具调用时的卡片提示文案
+_TOOL_LABELS = {
+    "web_search": "联网搜索资料",
+    "industry_research": "生成行业简报",
+    "report_reader": "速读研报",
+    "meeting_notes": "整理会议纪要",
+}
+
+
+def _stream_agent_into_card(reply_msg_id: str, user_text: str, open_id: str = "") -> None:
+    """跑 Agent 循环，把事件流映射成卡片更新（与 _stream_into_card 同一套 1s 节流限流）。
+
+    事件映射：
+    - tool_use    → 立即更新卡片显示"正在调用xx工具"，让用户看到进度
+    - text_delta  → 累积最终回答，1s 节流更新
+    - error/done  → 收尾更新
+    """
+    agent = ResearchAgent(user_scope=f"user:{open_id}" if open_id else "")
+    buffer = ""
+    last_update = 0.0
+
+    def _update(body: str) -> None:
+        feishu_client.update_card(reply_msg_id, markdown_to_card(body, title="投研助理"))
+
+    for event in agent.run_stream(user_text):
+        etype = event.get("type")
+        if etype == "tool_use":
+            label = _TOOL_LABELS.get(event["tool"], event["tool"])
+            hint = ""
+            if event["tool"] == "web_search":
+                hint = f"：{event['input'].get('query', '')}"
+            elif event["tool"] == "industry_research":
+                hint = f"：{event['input'].get('topic', '')}"
+            _update(f"🔧 正在{label}{hint}…")
+            last_update = time.time()
+        elif etype == "text_delta":
+            buffer += event["delta"]
+            now = time.time()
+            if now - last_update >= 1.0:
+                _update(buffer + " ▍")
+                last_update = now
+        elif etype == "error":
+            buffer = buffer or f"⚠️ 处理失败：{event['message']}"
+            break
+
+    _update(buffer or "⚠️ 没有生成内容，请换个问法试试。")
+
+
+def _strip_prefix(text: str, prefixes: tuple[str, ...]) -> str:
+    """去掉指令前缀，保留正文（出文档指令的 topic 提取用）。"""
+    out = text
+    for p in prefixes:
+        if out.startswith(p):
+            out = out[len(p):]
+    return out.strip("：: ，,。.\n ")
 
 
 def handle_file_message(message_id: str, file_key: str, file_name: str) -> None:
@@ -252,3 +314,47 @@ def _extract_text(content_str: str) -> str:
 @app.get("/")
 async def health() -> dict:
     return {"status": "ok", "bot": "feishu-research-bot"}
+
+
+# ---------- 每日行业日报：任务管理 API ----------
+
+@app.on_event("startup")
+def _startup() -> None:
+    daily_report.start_scheduler()
+
+
+@app.get("/reports/jobs")
+def list_report_jobs() -> dict:
+    return {"jobs": daily_report.list_jobs()}
+
+
+@app.post("/reports/jobs")
+async def create_report_job(req: Request) -> dict:
+    """新建日报任务。body: {"cron": "0 9 * * *", "chat_id": "oc_xxx", "topic": "人形机器人"}"""
+    body = await req.json()
+    try:
+        job = daily_report.add_job(
+            cron=str(body.get("cron", "")).strip(),
+            chat_id=str(body.get("chat_id", "")).strip(),
+            topic=str(body.get("topic", "")).strip(),
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"ok": True, "job_id": job.id}
+
+
+@app.delete("/reports/jobs/{job_id}")
+def delete_report_job(job_id: str) -> dict:
+    return {"ok": daily_report.remove_job(job_id)}
+
+
+@app.post("/reports/jobs/{job_id}/run")
+def run_report_job_now(job_id: str, background_tasks: BackgroundTasks) -> dict:
+    """手动触发一次（测试用），不等待执行完成。"""
+    jobs = {j["id"]: j for j in daily_report.list_jobs()}
+    jd = jobs.get(job_id)
+    if not jd:
+        return JSONResponse({"error": "job not found"}, status_code=404)
+    job = daily_report.ReportJob(**jd)
+    background_tasks.add_task(daily_report.run_job, job)
+    return {"ok": True}

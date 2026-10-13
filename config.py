@@ -21,6 +21,7 @@ class DeepSeekConfig:
     api_key: str
     base_url: str
     model: str
+    anthropic_base_url: str
 
 
 @dataclass
@@ -41,6 +42,9 @@ def load_config() -> AppConfig:
         api_key=os.getenv("DEEPSEEK_API_KEY", ""),
         base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
         model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        anthropic_base_url=os.getenv(
+            "DEEPSEEK_ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic"
+        ),
     )
     port = int(os.getenv("PORT", "8000"))
     return AppConfig(feishu=feishu, deepseek=deepseek, port=port)

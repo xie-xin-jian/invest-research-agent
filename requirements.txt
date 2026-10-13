@@ -6,3 +6,5 @@ openai
 pydantic
 pypdf
 python-docx
+anthropic
+ddgs

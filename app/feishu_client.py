@@ -148,6 +148,22 @@ def download_file(message_id: str, file_key: str) -> bytes:
     return resp.content
 
 
+def send_card(chat_id: str, card: dict) -> dict:
+    """主动发送卡片消息到指定群（日报推送等场景，非回复）。"""
+    resp = httpx.post(
+        f"{_BASE}/im/v1/messages",
+        headers=_headers(),
+        params={"receive_id_type": "chat_id"},
+        json={
+            "receive_id": chat_id,
+            "content": json_dumps(card),
+            "msg_type": "interactive",
+        },
+        timeout=10,
+    )
+    return resp.json()
+
+
 def json_dumps(obj: Any) -> str:
     import json
 
